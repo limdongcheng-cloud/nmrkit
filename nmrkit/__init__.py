@@ -22,6 +22,7 @@ from .processing import (
     ft_unshift,
     phase_correct,
     correct_digital_filter_phase,
+    remove_digital_filter,
     autophase,
     complexify_indirect_dim,
 )
@@ -117,6 +118,7 @@ __all__ = [
     # Phase processing - main names
     "phase_correct",
     "correct_digital_filter_phase",
+    "remove_digital_filter",
     "autophase",
     # Complex processing - main names
     "complexify_indirect_dim",

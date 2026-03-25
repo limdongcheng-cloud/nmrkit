@@ -22,8 +22,8 @@ class DeltaReader(FormatReader):
     OFFSET_AXIS_STOP = 336  # Axis stop values
     OFFSET_BASE_FREQ = 1064  # Base frequencies
     OFFSET_ZERO_POINT = 1128  # Zero points (offsets)
-    OFFSET_PARAM_START = 1240  # Parameter start position
-    OFFSET_PARAM_LENGTH = 1244  # Parameter length in bytes
+    OFFSET_PARAM_START = 1212  # Parameter start position
+    OFFSET_PARAM_LENGTH = 1216  # Parameter length in bytes
     OFFSET_DATA_START = 1284  # Data start position
     OFFSET_DATA_LENGTH = 1288  # Data length in bytes
 
@@ -81,9 +81,12 @@ class DeltaReader(FormatReader):
     INF_PLUS1 = 4  # Plus 1
     INF_POS = 5  # Positive infinity
 
-    # String length constants
-    JVAL_STRLEN = 16  # Length of string values
-    NAMELEN = 128  # Length of names (assumed value)
+    # Parameter record constants
+    JVAL_STRLEN = 16  # Length of string values in parameter records
+    PARAM_NAMELEN = 28  # Length of parameter names in records
+    PARAM_RECORD_SIZE = 64  # Total bytes per parameter record
+    PARAM_NUM_UNITS = 5  # Number of unit structs per parameter
+    PARAM_UNIT_SIZE = 2  # Bytes per unit struct (prefix+power, base)
 
     def __init__(self, filename: str, options: Optional[Dict] = None):
         super().__init__(filename, options)
@@ -101,7 +104,7 @@ class DeltaReader(FormatReader):
     def read(self) -> NMRData:
         with open(self.filename, "rb") as self._file:
             self._parse_header()
-            params = self._parse_params()
+            self._params = self._parse_params()
             data = self._read_data()
             dimensions = self._create_dimensions()
             metadata = self._create_metadata()
@@ -230,156 +233,112 @@ class DeltaReader(FormatReader):
     def _parse_params(self) -> Dict:
         """Parse parameters from the JEOL Delta format file.
 
+        Each parameter record is 64 bytes with the following layout:
+            Bytes 0-3:   skip (4 bytes)
+            Bytes 4-5:   scaler (int16, file endianness)
+            Bytes 6-15:  5 unit structs (2 bytes each: prefix+power, base)
+            Bytes 16-31: value data (16 bytes, format depends on type)
+            Bytes 32-35: value type code (int32, file endianness)
+            Bytes 36-63: parameter name (28 bytes, space-padded ASCII)
+
         Returns:
-            Dict: A dictionary containing parsed parameters.
+            Dict: A flat dictionary mapping lowercase parameter names to values.
         """
         params = {}
 
         try:
-            # Check if we have valid parameter section information
-            if not hasattr(
-                    self,
-                    "_param_start") or not hasattr(
-                    self,
-                    "_param_length"):
+            if not hasattr(self, "_param_start") or not hasattr(
+                self, "_param_length"
+            ):
                 self._parse_header()
 
-            # Skip if no parameters
             if self._param_length <= 0:
                 return params
 
-            # Read parameter header and values
             self._file.seek(self._param_start)
             param_data = self._file.read(self._param_length)
 
-            # Verify we read the expected amount of data
             if len(param_data) != self._param_length:
                 raise IOError(
-                    f"Expected to read {
-                        self._param_length} bytes for parameters, but got {
-                        len(param_data)} bytes")
+                    f"Expected {self._param_length} bytes for parameters, "
+                    f"got {len(param_data)}"
+                )
 
-            # Parse parameter header
-            parm_hdr_offset = 0
-            parm_size = struct.unpack_from(
-                ">I", param_data, parm_hdr_offset)[0]
-            lo_id = struct.unpack_from(
-                ">I", param_data, parm_hdr_offset + 4)[0]
-            hi_id = struct.unpack_from(
-                ">I", param_data, parm_hdr_offset + 8)[0]
-            total_size = struct.unpack_from(
-                ">I", param_data, parm_hdr_offset + 12)[0]
+            # Endianness for parameter values follows the file's endian flag
+            fmt = "<" if self._byte_order == "little" else ">"
 
-            # Calculate the number of parameters
-            num_params = hi_id - lo_id + 1
+            # Parse parameter section header (4 × uint32)
+            parm_size = struct.unpack_from(f"{fmt}I", param_data, 0)[0]
+            lo_id = struct.unpack_from(f"{fmt}I", param_data, 4)[0]
+            hi_id = struct.unpack_from(f"{fmt}I", param_data, 8)[0]
 
-            # Skip the parameter header
-            param_val_offset = parm_hdr_offset + 16  # 4 ints * 4 bytes each
+            num_params = hi_id + 1
+            offset = 16  # skip 16-byte header
 
-            # Parse each parameter value (DeltaParmVal)
-            for i in range(num_params):
-                # Check if we have enough data left
-                if param_val_offset + \
-                        (2 * (self.NAMELEN + 1)) + 4 + 16 + 16 + 4 > len(param_data):
+            for _ in range(num_params):
+                if offset + self.PARAM_RECORD_SIZE > len(param_data):
                     break
 
-                # Read parameter class name
-                param_class = struct.unpack_from(
-                    f">{self.NAMELEN + 1}s", param_data, param_val_offset
-                )[0]
-                param_class = param_class.decode(
-                    "utf-8", errors="ignore").strip("\x00")
-                param_val_offset += self.NAMELEN + 1
+                rec = param_data[offset: offset + self.PARAM_RECORD_SIZE]
 
-                # Read unit scale
-                unit_scale = struct.unpack_from(
-                    ">I", param_data, param_val_offset)[0]
-                param_val_offset += 4
+                # Value type at bytes 32-35
+                val_type = struct.unpack_from(f"{fmt}i", rec, 32)[0]
 
-                # Skip units[2] (2 jUnit structs, total 24 bytes)
-                # 2 * (int unitType, int unitExp, int scaleType) = 2 * 3 * 4
-                # bytes
-                param_val_offset += 24
-
-                # Read value
-                # Read string value
-                str_val = struct.unpack_from(
-                    f">{self.JVAL_STRLEN}s", param_data, param_val_offset
-                )[0]
-                str_val = str_val.decode(
-                    "utf-8", errors="ignore").strip("\x00")
-                param_val_offset += self.JVAL_STRLEN
-
-                # Read double value
-                double_val = struct.unpack_from(
-                    ">d", param_data, param_val_offset)[0]
-                param_val_offset += 8
-
-                # Read integer value
-                int_val = struct.unpack_from(
-                    ">I", param_data, param_val_offset)[0]
-                param_val_offset += 4
-
-                # Read infinity type
-                inf_type = struct.unpack_from(
-                    ">I", param_data, param_val_offset)[0]
-                param_val_offset += 4
-
-                # Read complex value (jComplex)
-                complex_re = struct.unpack_from(
-                    ">d", param_data, param_val_offset)[0]
-                complex_im = struct.unpack_from(
-                    ">d", param_data, param_val_offset + 8)[0]
-                param_val_offset += 16
-
-                # Read value type
-                val_type = struct.unpack_from(
-                    ">I", param_data, param_val_offset)[0]
-                param_val_offset += 4
-
-                # Read parameter name
-                param_name = struct.unpack_from(
-                    f">{self.NAMELEN + 1}s", param_data, param_val_offset
-                )[0]
-                param_name = param_name.decode(
-                    "utf-8", errors="ignore").strip("\x00")
-                param_val_offset += self.NAMELEN + 1
-
-                # Determine the actual value based on val_type
+                # Value data at bytes 16-31
+                val_start = 16
                 actual_val = None
-                if val_type == self.PARMVAL_STR:
-                    actual_val = str_val
-                elif val_type == self.PARMVAL_INT:
-                    actual_val = int_val
-                elif val_type == self.PARMVAL_FLT:
-                    actual_val = double_val
-                elif val_type == self.PARMVAL_Z:
-                    actual_val = complex(complex_re, complex_im)
-                elif val_type == self.PARMVAL_INF:
-                    if inf_type == self.INF_NEG:
-                        actual_val = float("-inf")
-                    elif inf_type == self.INF_POS:
-                        actual_val = float("inf")
-                    elif inf_type == self.INF_ZERO:
-                        actual_val = 0.0
-                    elif inf_type == self.INF_PLUS1:
-                        actual_val = 1.0
-                    elif inf_type == self.INF_MINUS1:
-                        actual_val = -1.0
 
-                # Store parameter in dictionary
-                if param_name:
-                    if param_class:
-                        if param_class not in params:
-                            params[param_class] = {}
-                        params[param_class][param_name] = actual_val
-                    else:
-                        params[param_name] = actual_val
+                if val_type == self.PARMVAL_STR:
+                    raw = rec[val_start: val_start + self.JVAL_STRLEN]
+                    # Strip spaces and nulls (matching jeolconverter behavior)
+                    actual_val = raw.decode("ascii", errors="replace")
+                    actual_val = "".join(
+                        c for c in actual_val if c != "\x00" and c != " "
+                    )
+                elif val_type == self.PARMVAL_INT:
+                    actual_val = struct.unpack_from(
+                        f"{fmt}i", rec, val_start
+                    )[0]
+                elif val_type == self.PARMVAL_FLT:
+                    actual_val = struct.unpack_from(
+                        f"{fmt}d", rec, val_start
+                    )[0]
+                elif val_type == self.PARMVAL_Z:
+                    re_val = struct.unpack_from(
+                        f"{fmt}d", rec, val_start
+                    )[0]
+                    im_val = struct.unpack_from(
+                        f"{fmt}d", rec, val_start + 8
+                    )[0]
+                    actual_val = complex(re_val, im_val)
+                elif val_type == self.PARMVAL_INF:
+                    inf_code = struct.unpack_from(
+                        f"{fmt}i", rec, val_start
+                    )[0]
+                    inf_map = {
+                        self.INF_NEG: float("-inf"),
+                        self.INF_POS: float("inf"),
+                        self.INF_ZERO: 0.0,
+                        self.INF_PLUS1: 1.0,
+                        self.INF_MINUS1: -1.0,
+                    }
+                    actual_val = inf_map.get(inf_code)
+
+                # Parameter name at bytes 36-63 (28 bytes, strip spaces/nulls)
+                name_raw = rec[36: 36 + self.PARAM_NAMELEN]
+                param_name = (
+                    name_raw.decode("ascii", errors="replace")
+                    .strip()
+                    .strip("\x00")
+                )
+
+                if param_name and actual_val is not None:
+                    params[param_name.lower()] = actual_val
+
+                offset += self.PARAM_RECORD_SIZE
 
         except Exception as e:
-            # Log the error but don't fail the entire read operation
             import logging
-
             logging.warning(f"Failed to parse parameters: {str(e)}")
 
         return params
@@ -552,7 +511,78 @@ class DeltaReader(FormatReader):
 
         return dimensions
 
+    def _calculate_digital_filter_group_delay(self) -> float:
+        """Calculate group delay from JEOL multi-stage decimation filter params.
+
+        Uses the 'orders' and 'factors' parameters to compute:
+            sum((order_i - 1) / product(factors[i:])) / 2
+        then converts to data points via x_sweep, x_acq_time, x_points.
+
+        Returns:
+            Group delay in data points, or 0.0 if parameters are missing.
+        """
+        p = self._params
+        orders_str = p.get("orders")
+        factors_str = p.get("factors")
+        x_sweep = p.get("x_sweep")
+        x_acq_time = p.get("x_acq_time")
+        x_points = p.get("x_points")
+
+        if not all(
+            v is not None
+            for v in [orders_str, factors_str, x_sweep, x_acq_time, x_points]
+        ):
+            return 0.0
+
+        if not isinstance(orders_str, str) or not isinstance(factors_str, str):
+            return 0.0
+
+        try:
+            num_stages = int(orders_str[0])
+            if num_stages <= 0 or len(orders_str) < 2:
+                return 0.0
+
+            orders_rest = orders_str[1:]
+            chars_per_order = len(orders_rest) // num_stages
+            if chars_per_order <= 0:
+                return 0.0
+
+            factors = [int(factors_str[i]) for i in range(num_stages)]
+            orders = []
+            pos = 0
+            for _ in range(num_stages):
+                orders.append(int(orders_rest[pos: pos + chars_per_order]))
+                pos += chars_per_order
+
+            # Accumulate group delay in abstract units
+            total = 0.0
+            for stage in range(num_stages):
+                product = 1
+                for j in range(stage, num_stages):
+                    product *= factors[j]
+                total += (orders[stage] - 1) / product
+
+            total /= 2.0
+
+            # Convert to data points.
+            # When parameters are consistent (x_sweep * x_acq_time ≈ x_points),
+            # the conversion refines the value. For arrayed/2D experiments where
+            # the parameter set may refer to the indirect dimension, the raw
+            # accumulator is already in output data-point units, so use it
+            # directly as fallback.
+            if x_sweep != 0 and x_acq_time != 0 and x_points != 0:
+                expected_points = x_sweep * x_acq_time
+                if 0.5 < expected_points / x_points < 2.0:
+                    return total / x_sweep / x_acq_time * (x_points - 1)
+
+            return total
+
+        except (ValueError, IndexError):
+            return 0.0
+
     def _create_metadata(self) -> Dict[str, any]:
+        group_delay = self._calculate_digital_filter_group_delay()
+
         metadata = {
             # Basic file information
             "source_format": "delta",
@@ -560,7 +590,7 @@ class DeltaReader(FormatReader):
             "endianness": self._byte_order,
             # Data structure information
             "dimension_count": self._dim_count,
-            "data_type": self._data_type.__name__,  # Get numpy dtype name
+            "data_type": self._data_type.__name__,
             "data_start_offset": self._data_start,
             "data_length_bytes": self._data_length,
             # Dimension-specific information
@@ -571,6 +601,10 @@ class DeltaReader(FormatReader):
             # NMR-specific parameters
             "base_frequencies": self._base_freq[: self._dim_count],
             "zero_points": self._zero_point[: self._dim_count],
+            # Digital filter
+            "digital_filter_group_delay": group_delay,
+            # Parsed parameters
+            "parameters": self._params,
         }
 
         return metadata
@@ -581,13 +615,23 @@ class DeltaReader(FormatReader):
             target_shape: tuple) -> np.ndarray:
         dim_0_size, dim_1_size = target_shape
 
-        return (
-            arr_1d.reshape(
-                dim_1_size // self.BLOCK_SIZE,
-                dim_0_size // self.BLOCK_SIZE,
-                self.BLOCK_SIZE,
-                self.BLOCK_SIZE,
+        # Block-based rearrangement only when both dimensions are
+        # divisible by BLOCK_SIZE (standard 2D format). Small_2D and
+        # arrayed experiments store data linearly.
+        if (dim_0_size % self.BLOCK_SIZE == 0
+                and dim_1_size % self.BLOCK_SIZE == 0
+                and dim_0_size >= self.BLOCK_SIZE
+                and dim_1_size >= self.BLOCK_SIZE):
+            return (
+                arr_1d.reshape(
+                    dim_1_size // self.BLOCK_SIZE,
+                    dim_0_size // self.BLOCK_SIZE,
+                    self.BLOCK_SIZE,
+                    self.BLOCK_SIZE,
+                )
+                .transpose(1, 3, 0, 2)
+                .reshape(dim_0_size, dim_1_size)
             )
-            .transpose(1, 3, 0, 2)
-            .reshape(dim_0_size, dim_1_size)
-        )
+
+        # Linear reshape for small/arrayed data
+        return arr_1d.reshape(dim_0_size, dim_1_size)
