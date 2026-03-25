@@ -25,6 +25,10 @@ def process(data, **kwargs):
     data : nmrkit.Data
         Processed NMR data.
     """
+    # Remove digital filter in time domain for JEOL data (before FT)
+    if data.source_format == "delta":
+        data = nk.remove_digital_filter(data)
+
     em_lb = kwargs.get("em_lb", 1)
     data = nk.em(data, lb=em_lb)
 
@@ -32,7 +36,9 @@ def process(data, **kwargs):
 
     data = nk.ft(data)
 
-    data = nk.correct_digital_filter_phase(data)
+    # Frequency-domain digital filter correction for Bruker data
+    if data.source_format != "delta":
+        data = nk.correct_digital_filter_phase(data)
 
     ph0 = kwargs.get("ph0", None)
     ph1 = kwargs.get("ph1", None)

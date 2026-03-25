@@ -167,6 +167,12 @@ def correct_digital_filter_phase(
                     group_delay = data.metadata["parameters"][indirect_key].get(
                         "GRPDLY", 0.0)
 
+        # Check if this is JEOL Delta data with computed group delay
+        elif data.source_format == "delta":
+            group_delay = data.metadata.get(
+                "digital_filter_group_delay", 0.0
+            )
+
     # Create copy to avoid modifying original data
     result = data.copy()
 
@@ -190,6 +196,61 @@ def correct_digital_filter_phase(
 
     result.dimensions[dim].domain_metadata["phase_correction"].append(
         {"type": "digital_filter", "group_delay": group_delay}
+    )
+
+    return result
+
+
+def remove_digital_filter(
+    data: NMRData, dim: int = 0, group_delay: Optional[float] = None
+) -> NMRData:
+    """Remove digital filter artifact from time-domain FID data by circular shift.
+
+    This function removes the pre-echo artifact caused by the digital filter by
+    circular-shifting the FID left by the group delay amount and zeroing the
+    wrapped points. Must be called BEFORE Fourier transform.
+
+    Args:
+        data: NMRData object (must be time-domain)
+        dim: Dimension index (default: 0)
+        group_delay: Group delay in points. If None, extracted from metadata.
+
+    Returns:
+        NMRData: Copy with digital filter artifact removed
+    """
+    validate_dimension(data, dim)
+
+    if group_delay is None:
+        group_delay = 0.0
+        if data.source_format == "topspin" and "parameters" in data.metadata:
+            if "direct" in data.metadata["parameters"]:
+                group_delay = data.metadata["parameters"]["direct"].get(
+                    "GRPDLY", 0.0
+                )
+        elif data.source_format == "delta":
+            group_delay = data.metadata.get(
+                "digital_filter_group_delay", 0.0
+            )
+
+    shift = int(round(group_delay))
+    if shift <= 0:
+        return data.copy()
+
+    result = data.copy()
+
+    # Circular shift left by 'shift' points along the target dimension
+    result.data = np.roll(result.data, -shift, axis=dim)
+
+    # Zero the last 'shift' points (the wrapped pre-echo)
+    slices = [slice(None)] * result.ndim
+    slices[dim] = slice(-shift, None)
+    result.data[tuple(slices)] = 0
+
+    # Update metadata
+    if "phase_correction" not in result.dimensions[dim].domain_metadata:
+        result.dimensions[dim].domain_metadata["phase_correction"] = []
+    result.dimensions[dim].domain_metadata["phase_correction"].append(
+        {"type": "digital_filter_removal", "group_delay": group_delay, "shift": shift}
     )
 
     return result
