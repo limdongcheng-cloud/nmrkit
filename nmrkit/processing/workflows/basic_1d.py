@@ -19,6 +19,20 @@ def process(data, **kwargs):
             First order phase correction.
         pivot : int, optional
             Pivot point for phase correction.
+        baseline : bool, optional
+            Enable baseline correction (default: False). When True, uses
+            AsLS algorithm. Disabled by default to avoid introducing
+            subjective bias into automated processing.
+        bc_method : str, optional
+            Baseline correction method: "asls", "airpls", or "polynomial".
+            Only used when baseline=True.
+        bc_lambda : float, optional
+            Smoothness parameter for AsLS/airPLS. Only used when baseline=True.
+        bc_p : float, optional
+            Asymmetry parameter for AsLS. Only used when baseline=True.
+        bc_order : int, optional
+            Polynomial order (for method="polynomial"). Only used when
+            baseline=True.
 
     Returns
     -------
@@ -48,5 +62,17 @@ def process(data, **kwargs):
         data = nk.phase(data, ph0=ph0, ph1=ph1, pivot=pivot)
     else:
         data = nk.autophase(data)
+
+    # Baseline correction (opt-in to avoid subjective bias in automation)
+    if kwargs.get("baseline", False):
+        bc_method = kwargs.get("bc_method", "asls")
+        bc_kwargs = {}
+        if "bc_lambda" in kwargs:
+            bc_kwargs["lambda_"] = kwargs["bc_lambda"]
+        if "bc_p" in kwargs:
+            bc_kwargs["p"] = kwargs["bc_p"]
+        if "bc_order" in kwargs:
+            bc_kwargs["order"] = kwargs["bc_order"]
+        data = nk.baseline_correct(data, method=bc_method, **bc_kwargs)
 
     return data

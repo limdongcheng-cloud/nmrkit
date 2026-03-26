@@ -26,6 +26,8 @@ def process(data, **kwargs):
     data = nk.ft(data, dim=0)
     data = nk.correct_digital_filter_phase(data)
     data = nk.autophase(data, dim=0)
+    if kwargs.get("baseline", False):
+        data = nk.baseline_correct(data, dim=0)
 
     # Indirect dimension processing
     data = nk.complexify_indirect(data)
@@ -33,5 +35,7 @@ def process(data, **kwargs):
     data = nk.zf(data, dim=1, size=2048)
     data = nk.ft(data, dim=1)
     data = nk.autophase(data, dim=1)
+    if kwargs.get("baseline", False):
+        data = nk.baseline_correct(data, dim=1)
 
     return data
