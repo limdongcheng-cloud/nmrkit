@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Dict, Optional
+from scipy.optimize import minimize
 from nmrkit.core import NMRData
 from nmrkit.utils import (
     validate_dimension,
@@ -256,17 +257,294 @@ def remove_digital_filter(
     return result
 
 
-def autophase(data: NMRData, dim: int = 0, **kwargs) -> NMRData:
-    """Automatic phase correction (to be implemented).
+def _apply_phase(spectrum: np.ndarray, ph0: float, ph1: float) -> np.ndarray:
+    """Apply phase correction to a 1D complex spectrum (internal helper).
 
     Args:
-        data: NMRData object to process
-        dim: Dimension index to apply automatic phase correction to (default: 0)
-        **kwargs: Additional parameters for automatic phase correction
+        spectrum: 1D complex array
+        ph0: Zero-order phase in radians
+        ph1: First-order phase in radians
 
     Returns:
-        NMRData: New NMRData object with automatic phase correction applied
+        Phase-corrected 1D complex array
     """
-    # Placeholder for future implementation
-    # For now, just return a copy of the data
-    return data.copy()
+    n = len(spectrum)
+    indices = np.arange(n) / max(n - 1, 1)  # normalized 0..1
+    phase = ph0 + ph1 * indices
+    return spectrum * np.exp(1j * phase)
+
+
+def _detect_signal_region(spectrum: np.ndarray, threshold: float = 3.0) -> np.ndarray:
+    """Detect indices where signal (not noise) is present.
+
+    Uses a moving-average envelope of the absolute spectrum and returns
+    a boolean mask where the envelope exceeds threshold × median level.
+
+    This is critical for wide spectra (e.g., 13C with 200+ ppm) where
+    most points are pure noise. Computing entropy over noise misleads
+    the optimizer.
+
+    Args:
+        spectrum: 1D complex frequency-domain array
+        threshold: Signal/noise multiplier (default: 3.0)
+
+    Returns:
+        Boolean mask array (True = signal region)
+    """
+    absspec = np.abs(spectrum)
+    n = len(absspec)
+
+    # Smoothing window ~0.5% of spectrum width, at least 16 points
+    win = max(16, n // 200)
+    if win % 2 == 0:
+        win += 1
+
+    # Moving average via convolution
+    kernel = np.ones(win) / win
+    envelope = np.convolve(absspec, kernel, mode="same")
+
+    # Noise level from median (robust against signal peaks)
+    noise = np.median(envelope)
+    if noise == 0:
+        noise = np.mean(envelope) + 1e-15
+
+    mask = envelope > threshold * noise
+
+    # Dilate the mask to include peak tails
+    dilation = win * 2
+    indices = np.where(mask)[0]
+    if len(indices) == 0:
+        # No signal detected — fall back to full spectrum
+        return np.ones(n, dtype=bool)
+
+    dilated = np.zeros(n, dtype=bool)
+    for idx in indices:
+        lo = max(0, idx - dilation)
+        hi = min(n, idx + dilation + 1)
+        dilated[lo:hi] = True
+
+    return dilated
+
+
+def _acme_objective(params: np.ndarray, spectrum: np.ndarray,
+                    signal_mask: np.ndarray = None) -> float:
+    """ACME entropy minimization objective function.
+
+    Computes the Shannon entropy of the derivative of the real part of the
+    phase-corrected spectrum, plus a penalty for negative signal area.
+    When signal_mask is provided, only the signal region contributes to
+    the objective, avoiding noise domination in wide spectra.
+
+    Reference: Chen et al., J. Magn. Reson. 158, 164-168 (2002)
+
+    Args:
+        params: [ph0, ph1] in radians
+        spectrum: 1D complex frequency-domain array
+        signal_mask: Optional boolean mask for signal regions
+
+    Returns:
+        Entropy value (lower is better)
+    """
+    ph0, ph1 = params
+    corrected = _apply_phase(spectrum, ph0, ph1)
+    real = corrected.real
+
+    # If signal mask provided, focus on those regions
+    if signal_mask is not None:
+        real_sig = real[signal_mask]
+    else:
+        real_sig = real
+
+    if len(real_sig) < 2:
+        return 1e10
+
+    # First derivative of the real spectrum
+    deriv = np.diff(real_sig)
+
+    # Normalized absolute derivative → probability distribution
+    abs_deriv = np.abs(deriv)
+    total = abs_deriv.sum()
+    if total == 0:
+        return 1e10
+
+    p = abs_deriv / total
+
+    # Shannon entropy (avoid log(0))
+    mask = p > 1e-15
+    entropy = -np.sum(p[mask] * np.log(p[mask]))
+
+    # Penalty for negative area (encourages absorption-mode peaks)
+    # Weight penalty more heavily for wide spectra where entropy alone
+    # is insufficient to discriminate correct phasing
+    neg_vals = real_sig[real_sig < 0]
+    penalty = np.sum(neg_vals ** 2) / max(len(real_sig), 1) / max(total, 1e-15)
+
+    return entropy + 1000.0 * penalty
+
+
+def _peak_minima_objective(params: np.ndarray, spectrum: np.ndarray,
+                           signal_mask: np.ndarray = None) -> float:
+    """Peak-minima objective: minimize negative peak area.
+
+    Simpler alternative to ACME. Minimizes the sum of squared negative values
+    in the real part of the phase-corrected spectrum.
+
+    Args:
+        params: [ph0, ph1] in radians
+        spectrum: 1D complex frequency-domain array
+        signal_mask: Optional boolean mask for signal regions
+
+    Returns:
+        Negative-area score (lower is better)
+    """
+    ph0, ph1 = params
+    corrected = _apply_phase(spectrum, ph0, ph1)
+    real = corrected.real
+
+    if signal_mask is not None:
+        real = real[signal_mask]
+
+    # Sum of squared negative values, normalized by spectrum length
+    neg_area = np.sum(real[real < 0] ** 2)
+    return neg_area / max(len(real), 1)
+
+
+def _estimate_ph0_from_max_peak(spectrum: np.ndarray) -> float:
+    """Estimate zero-order phase from the largest peak.
+
+    Finds the point with maximum absolute value and returns the angle
+    needed to rotate it to be purely real and positive.
+
+    Args:
+        spectrum: 1D complex frequency-domain array
+
+    Returns:
+        Estimated ph0 in radians
+    """
+    idx = np.argmax(np.abs(spectrum))
+    return -np.angle(spectrum[idx])
+
+
+def autophase(
+    data: NMRData,
+    dim: int = 0,
+    method: str = "acme",
+    **kwargs,
+) -> NMRData:
+    """Automatic phase correction of frequency-domain NMR data.
+
+    Optimizes zero-order (ph0) and first-order (ph1) phase parameters
+    to produce a properly phased absorption-mode spectrum.
+
+    Args:
+        data: NMRData object (must be frequency-domain complex data)
+        dim: Dimension index to apply phase correction to (default: 0)
+        method: Algorithm to use (default: "acme")
+            - "acme": Entropy minimization (Chen et al., JMR 2002). Most
+              robust for general use.
+            - "peak_minima": Minimize negative peak area. Faster, works
+              well for clean spectra with well-resolved peaks.
+        **kwargs: Additional parameters:
+            - ph0_init (float): Initial guess for ph0 in degrees (default: auto)
+            - ph1_init (float): Initial guess for ph1 in degrees (default: 0)
+
+    Returns:
+        NMRData: New NMRData object with optimized phase correction applied
+    """
+    validate_dimension(data, dim)
+
+    result = data.copy()
+    dim_size = result.dimensions[dim].size
+
+    # Select objective function
+    if method == "acme":
+        objective = _acme_objective
+    elif method == "peak_minima":
+        objective = _peak_minima_objective
+    else:
+        raise ValueError(f"Unknown autophase method: {method!r}. "
+                         f"Use 'acme' or 'peak_minima'.")
+
+    # --- Optimize per-slice along the target dimension ---
+    # For 1D data this is a single optimization.
+    # For nD data we iterate over all other dimensions (e.g., each row of a 2D).
+
+    # Move target dim to axis 0 for uniform iteration
+    work = np.moveaxis(result.data, dim, 0)
+    shape_rest = work.shape[1:]
+    work_2d = work.reshape(dim_size, -1)  # (dim_size, n_slices)
+
+    n_slices = work_2d.shape[1]
+
+    for s in range(n_slices):
+        spectrum = work_2d[:, s]
+
+        # Detect signal regions to focus the objective function
+        signal_mask = _detect_signal_region(spectrum)
+
+        # Initial guess
+        ph0_init_deg = kwargs.get("ph0_init", None)
+        ph1_init_deg = kwargs.get("ph1_init", None)
+
+        if ph0_init_deg is None:
+            ph0_init = _estimate_ph0_from_max_peak(spectrum)
+        else:
+            ph0_init = np.deg2rad(ph0_init_deg)
+
+        # Multi-start search over ph1 initial values for robustness.
+        # Wide spectra (13C, 19F) can have very large ph1 values that
+        # a single start at 0 would never reach.
+        if ph1_init_deg is not None:
+            ph1_starts = [np.deg2rad(ph1_init_deg)]
+        else:
+            ph1_starts = [np.deg2rad(v) for v in [0, -90, 90, -180, 180]]
+
+        best_obj = np.inf
+        best_ph0, best_ph1 = ph0_init, 0.0
+
+        for ph1_init in ph1_starts:
+            # Pass 1 — optimize ph0 only (fix ph1) for a good starting point
+            res0 = minimize(
+                lambda p, _ph1=ph1_init: objective(
+                    np.array([p[0], _ph1]), spectrum, signal_mask),
+                x0=[ph0_init],
+                method="Nelder-Mead",
+                options={"xatol": 1e-4, "fatol": 1e-10, "maxiter": 500},
+            )
+            ph0_warm = res0.x[0]
+
+            # Pass 2 — jointly optimize (ph0, ph1)
+            res = minimize(
+                objective,
+                x0=[ph0_warm, ph1_init],
+                args=(spectrum, signal_mask),
+                method="Nelder-Mead",
+                options={"xatol": 1e-4, "fatol": 1e-10, "maxiter": 3000},
+            )
+
+            if res.fun < best_obj:
+                best_obj = res.fun
+                best_ph0, best_ph1 = res.x
+
+        # Apply correction to this slice
+        work_2d[:, s] = _apply_phase(spectrum, best_ph0, best_ph1)
+
+    # Reshape back and restore dimension order
+    work = work_2d.reshape(dim_size, *shape_rest)
+    result.data = np.moveaxis(work, 0, dim)
+
+    # Convert final parameters to degrees for metadata (use last slice's values
+    # for 1D, which is the only slice)
+    ph0_deg = np.rad2deg(best_ph0) % 360
+    ph1_deg = np.rad2deg(best_ph1)
+
+    # Update metadata
+    if "phase_correction" not in result.dimensions[dim].domain_metadata:
+        result.dimensions[dim].domain_metadata["phase_correction"] = []
+
+    result.dimensions[dim].domain_metadata["phase_correction"].append(
+        {"type": "autophase", "method": method,
+         "ph0": float(ph0_deg), "ph1": float(ph1_deg)}
+    )
+
+    return result
