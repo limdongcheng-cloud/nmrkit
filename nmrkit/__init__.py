@@ -1,5 +1,12 @@
 """nmrkit: A comprehensive library for NMR data processing and analysis."""
 
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("nmrkit")
+except PackageNotFoundError:
+    __version__ = "unknown"
+
 # Core data structures
 from .processing.workflows.basic_2d import process as basic_2d_process
 from .processing.workflows.basic_1d import process as basic_1d_process
@@ -87,9 +94,6 @@ def auto_process(data, **kwargs):
             f"Auto processing not implemented for {
                 data.ndim}D data")
 
-
-# Version information
-__version__ = "0.1.0"
 
 # Define __all__ to control what gets imported with 'from nmrkit import *'
 __all__ = [

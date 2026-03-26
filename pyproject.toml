@@ -1,6 +1,6 @@
 [project]
 name = "nmrkit"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A lightweight Python library for nuclear magnetic resonance (NMR) data processing and analysis"
 authors = [
     {name = "Jiekang Tian",email = "jiekangtian@gmail.com"}
@@ -16,10 +16,19 @@ visualization = [
     "matplotlib"
 ]
 
-
 [build-system]
-requires = ["poetry-core>=2.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
+
+[tool.poetry]
+version = "0.0.0"
+
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+style = "pep440"
+format = "{base}"
+metadata = false
 
 [dependency-groups]
 dev = [

@@ -1,10 +1,11 @@
-# This workflow will upload a Python Package to PyPI when a release is created
+# This workflow builds and publishes the Python package to PyPI when a tag is pushed
 
 name: Upload Python Package
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -14,17 +15,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
+      - name: Install Poetry and dynamic versioning plugin
+        run: |
+          pip install poetry poetry-dynamic-versioning
+
       - name: Build release distributions
         run: |
-          # Install Poetry
-          pip install poetry
-          # Build the package using Poetry
           poetry build
 
       - name: Upload distributions
@@ -42,7 +48,7 @@ jobs:
 
     environment:
       name: pypi
-      url: https://pypi.org/project/nmrkit/${{ github.event.release.name }}
+      url: https://pypi.org/project/nmrkit/${{ github.ref_name }}
 
     steps:
       - name: Retrieve release distributions
