@@ -34,4 +34,12 @@ def process(data, **kwargs):
     data = nk.ft(data, dim=1)
     data = nk.autophase(data, dim=1)
 
+    # Baseline correction (opt-in, disabled by default)
+    baseline = kwargs.get("baseline", False)
+    if baseline:
+        bc_kwargs = {}
+        if isinstance(baseline, str):
+            bc_kwargs["method"] = baseline
+        data = nk.baseline_correct(data, **bc_kwargs)
+
     return data

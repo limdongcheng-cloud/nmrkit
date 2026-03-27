@@ -10,6 +10,7 @@ from .phase import (
     autophase,
 )
 from .complex import complexify_indirect_dim
+from .baseline import baseline_correct
 
 __all__ = [
     "first_point_scaling",
@@ -27,4 +28,5 @@ __all__ = [
     "remove_digital_filter",
     "autophase",
     "complexify_indirect_dim",
+    "baseline_correct",
 ]

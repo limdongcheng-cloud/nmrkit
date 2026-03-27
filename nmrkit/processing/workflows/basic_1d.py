@@ -49,4 +49,13 @@ def process(data, **kwargs):
     else:
         data = nk.autophase(data)
 
+    # Baseline correction (opt-in, disabled by default to avoid
+    # introducing subjective bias in automated workflows)
+    baseline = kwargs.get("baseline", False)
+    if baseline:
+        bc_kwargs = {}
+        if isinstance(baseline, str):
+            bc_kwargs["method"] = baseline
+        data = nk.baseline_correct(data, **bc_kwargs)
+
     return data

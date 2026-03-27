@@ -32,6 +32,7 @@ from .processing import (
     remove_digital_filter,
     autophase,
     complexify_indirect_dim,
+    baseline_correct,
 )
 
 # Complex conversion functions
@@ -58,6 +59,9 @@ ftunshift = ft_unshift
 
 # Phase processing
 phase = phase_correct
+
+# Baseline correction
+bc = baseline_correct
 
 # Complex processing
 complexify_indirect = complexify_indirect_dim
@@ -144,6 +148,8 @@ __all__ = [
     "ftunshift",
     "phase",
     "autophase",
+    "baseline_correct",
+    "bc",
     "complexify_indirect",
     # Workflow functions
     "process_1d",
